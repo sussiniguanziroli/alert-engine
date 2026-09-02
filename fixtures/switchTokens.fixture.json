@@ -1,0 +1,45 @@
+{
+  "_note": "FIXTURE COMPARTIDO — existe una copia idéntica en el panel, en iot-admin-panel/src/shared/fixtures/switchTokens.fixture.json. Si tocás un caso acá, tocá el otro. Los tests de ambos repos corren contra este archivo: es lo que evita que la tabla de tokens booleanos, duplicada a propósito entre motor y panel, derive en silencio.",
+  "version": 1,
+  "cases": [
+    { "in": "ON",     "on": true },
+    { "in": "1",      "on": true },
+    { "in": "TRUE",   "on": true },
+    { "in": "HIGH",   "on": true },
+    { "in": "MARCHA", "on": true },
+    { "in": "ACTIVE", "on": true },
+    { "in": "CLOSED", "on": true },
+    { "in": "START",  "on": true },
+    { "in": "ALARM",  "on": true },
+    { "in": "FAULT",  "on": true },
+
+    { "in": "on",     "on": true },
+    { "in": "true",   "on": true },
+    { "in": "closed", "on": true },
+    { "in": "tRuE",   "on": true },
+    { "in": "Marcha", "on": true },
+
+    { "in": " ON ",        "on": true },
+    { "in": "\tCLOSED\n",  "on": true },
+
+    { "in": "OFF",      "on": false },
+    { "in": "0",        "on": false },
+    { "in": "FALSE",    "on": false },
+    { "in": "LOW",      "on": false },
+    { "in": "PARADA",   "on": false },
+    { "in": "INACTIVE", "on": false },
+    { "in": "OPEN",     "on": false },
+    { "in": "STOP",     "on": false },
+
+    { "in": "",       "on": false },
+    { "in": "   ",    "on": false },
+    { "in": "2",      "on": false },
+    { "in": "ONLINE", "on": false },
+
+    { "in": 1,     "on": true },
+    { "in": 0,     "on": false },
+    { "in": true,  "on": true },
+    { "in": false, "on": false },
+    { "in": null,  "on": false }
+  ]
+}

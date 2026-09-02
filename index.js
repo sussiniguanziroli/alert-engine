@@ -1,11 +1,17 @@
 require('dotenv').config();
-const admin          = require('firebase-admin');
-const mqtt           = require('mqtt');
-const rulesCache     = require('./rulesCache');
-const evaluator      = require('./evaluator');
-const alertState     = require('./alertState');
-const emailNotifier  = require('./emailNotifier');
-const offlineWatcher = require('./offlineWatcher');
+const admin            = require('firebase-admin');
+const mqtt             = require('mqtt');
+const rulesCache       = require('./rulesCache');
+const evaluator        = require('./evaluator');
+const alertState       = require('./alertState');
+const emailNotifier    = require('./emailNotifier');
+const offlineWatcher   = require('./offlineWatcher');
+const automationsCache = require('./automationsCache');
+const automationEngine = require('./automationEngine');
+const commandSender    = require('./commandSender');
+const pauseRegistry    = require('./pauseRegistry');
+const scheduler        = require('./scheduler');
+const { extractValue } = require('./payload');
 
 const LOCAL_BROKER = process.env.MQTT_BROKER || 'mqtt://localhost:1883';
 const MQTT_USER    = process.env.MQTT_USER   || '';
@@ -25,24 +31,20 @@ if (!admin.apps.length) {
   });
 }
 
-const extractValue = (payloadStr, dataKey) => {
-  try {
-    const parsed = JSON.parse(payloadStr);
-    if (parsed[dataKey] !== undefined) return parsed[dataKey];
-    const match = Object.keys(parsed).find(k => k.toLowerCase() === dataKey.toLowerCase());
-    return match !== undefined ? parsed[match] : null;
-  } catch {
-    return payloadStr.trim();
-  }
-};
-
 let mqttClient = null;
 
+// Tres fuentes de tópicos, no dos: a las reglas de alerta y a las máquinas
+// vigiladas se suma ahora lo que necesitan las automatizaciones — los tópicos
+// que las disparan Y los de estado contra los que se confirma un comando. Sin
+// estos últimos no hay readback: un widget de control normalmente no tiene
+// ninguna regla de alerta, así que rulesCache nunca lo suscribiría.
 const subscribeToTopics = () => {
   if (!mqttClient?.connected) return;
-  const ruleTopics    = rulesCache.getTopics();
-  const machineTopics = offlineWatcher.getWatchedTopics();
-  const merged        = [...new Set([...ruleTopics, ...machineTopics])];
+  const merged = [...new Set([
+    ...rulesCache.getTopics(),
+    ...offlineWatcher.getWatchedTopics(),
+    ...automationsCache.getTopics(),
+  ])];
   if (!merged.length) { console.log('⚠️  [alert-engine] Sin topics'); return; }
   mqttClient.subscribe(merged, err => {
     if (!err) console.log(`👂 [alert-engine] Suscrito a ${merged.length} topics`);
@@ -50,14 +52,28 @@ const subscribeToTopics = () => {
   });
 };
 
+// Disparo encadenado: cuando alertState levanta una alarma, se buscan las
+// automatizaciones atadas a ese sourceKey.
+const onAlarmRaised = async (tenantId, sourceKey, alert) => {
+  const entries = automationsCache.getBySourceKey(sourceKey);
+  for (const entry of entries) {
+    if (entry.tenantId !== tenantId) continue;
+    await automationEngine.trigger(entry, `alarma "${alert.title || sourceKey}"`);
+  }
+};
+
 const start = async () => {
   console.log('🚀 [alert-engine] Iniciando...');
 
   alertState.setEmailHook(emailNotifier.onRaise);
+  alertState.setAutomationHook(onAlarmRaised);
 
   await alertState.watch();
   await rulesCache.load();
   await offlineWatcher.watchRegistry();
+  await automationsCache.load();
+  await pauseRegistry.watch();
+  await automationEngine.hydrate();
 
   global.__alertEngineResubscribe = subscribeToTopics;
 
@@ -72,9 +88,14 @@ const start = async () => {
     clean:           true,
   });
 
+  automationEngine.setClient(mqttClient);
+
   mqttClient.on('connect', () => {
     console.log('✅ [alert-engine] Conectado al broker');
     subscribeToTopics();
+    // El scheduler arranca recién con el broker arriba: si recupera una corrida
+    // vencida, el comando tiene que poder salir de verdad.
+    scheduler.start().catch(e => console.error('[alert-engine] scheduler:', e.message));
   });
 
   mqttClient.on('message', async (topic, message) => {
@@ -82,8 +103,12 @@ const start = async () => {
 
     offlineWatcher.updateSeenByTopic(topic);
 
-    const entries = rulesCache.getEntriesByTopic(topic);
-    for (const entry of entries) {
+    // Readback de comandos automáticos: se atiende primero y siempre, porque
+    // hay una promesa esperando con timeout del otro lado.
+    commandSender.handleMessage(topic, payloadStr);
+
+    // --- Reglas de alerta ---
+    for (const entry of rulesCache.getEntriesByTopic(topic)) {
       const value = extractValue(payloadStr, entry.dataKey);
       if (value === null || value === undefined) continue;
 
@@ -108,6 +133,14 @@ const start = async () => {
         }, triggered);
       }
     }
+
+    // --- Automatizaciones por medición ---
+    for (const entry of automationsCache.getByTopic(topic)) {
+      const value = extractValue(payloadStr, entry.trigger.dataKey);
+      if (value === null || value === undefined) continue;
+      const active = evaluator.evaluate(value, entry.trigger.condition, entry.trigger.threshold);
+      await automationEngine.applyTelemetry(entry, active, value);
+    }
   });
 
   mqttClient.on('reconnect', () => console.log('🔄 [alert-engine] Reconectando...'));
@@ -122,6 +155,9 @@ process.on('SIGINT', () => {
   rulesCache.stop();
   alertState.stop();
   offlineWatcher.stop();
+  automationsCache.stop();
+  pauseRegistry.stop();
+  scheduler.stop();
   if (mqttClient) mqttClient.end(true);
   process.exit(0);
 });

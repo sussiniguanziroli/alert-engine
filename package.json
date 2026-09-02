@@ -3,12 +3,12 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "Motor de alarmas y automatizaciones (LightBug Automations) del panel SF LightBug",
   "dependencies": {
     "dotenv": "^17.4.2",
     "firebase-admin": "^13.10.0",

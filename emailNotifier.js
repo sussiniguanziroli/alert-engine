@@ -16,7 +16,7 @@ const buildEmailHtml = ({ machineName, widgetTitle, severity, condition, value, 
     <span style="font-size:28px;font-weight:800;color:#fff;">F</span>
   </div>
   <h1 style="margin:0;color:#fff;font-size:22px;font-weight:800;">Alerta ${label}</h1>
-  <p style="margin:8px 0 0;color:rgba(255,255,255,0.9);font-size:14px;">${tenantName || 'Fortunato SCADA'}</p>
+  <p style="margin:8px 0 0;color:rgba(255,255,255,0.9);font-size:14px;">${tenantName || 'SF LightBug'}</p>
 </td></tr>
 <tr><td style="padding:32px 40px;">
   <table role="presentation" style="width:100%;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0;overflow:hidden;margin-bottom:24px;">
@@ -42,12 +42,12 @@ const buildEmailHtml = ({ machineName, widgetTitle, severity, condition, value, 
     </td></tr>
   </table>
   <div style="text-align:center;margin:32px 0;">
-    <a href="https://iot-admin-panel.netlify.app/app/home" style="display:inline-block;background:#1e293b;color:#fff;text-decoration:none;padding:14px 36px;border-radius:10px;font-weight:700;font-size:14px;">Ver en el panel</a>
+    <a href="https://sflightbug.com/app/home" style="display:inline-block;background:#1e293b;color:#fff;text-decoration:none;padding:14px 36px;border-radius:10px;font-weight:700;font-size:14px;">Ver en el panel</a>
   </div>
-  <p style="margin:0;color:#94a3b8;font-size:12px;text-align:center;">Este mensaje fue generado automáticamente por Fortunato SCADA.</p>
+  <p style="margin:0;color:#94a3b8;font-size:12px;text-align:center;">Este mensaje fue generado automáticamente por SF LightBug.</p>
 </td></tr>
 <tr><td style="background:#f8fafc;padding:20px 40px;text-align:center;border-top:1px solid #e2e8f0;">
-  <p style="margin:0;color:#94a3b8;font-size:11px;">© 2026 Fortunato SCADA Platform · fortunato.ctech@gmail.com</p>
+  <p style="margin:0;color:#94a3b8;font-size:11px;">© 2026 SF LightBug Platform · plataforma@sfflow.com.ar</p>
 </td></tr>
 </table></td></tr></table>
 </body></html>`;

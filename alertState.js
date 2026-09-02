@@ -12,6 +12,14 @@ const listeners = [];
 let emailHook = null;
 const setEmailHook = (fn) => { emailHook = fn; };
 
+// Hook de automatizaciones encadenadas, inyectado igual y por la misma razón.
+// Se dispara en el RAISE y no en cada mensaje MQTT que cumple la condición: el
+// anti-martilleo de applyCondition (una alarma ya activa no se reescribe) le
+// da a las automatizaciones encadenadas su antirrebote de un disparo por
+// episodio, sin código extra.
+let automationHook = null;
+const setAutomationHook = (fn) => { automationHook = fn; };
+
 const mkey      = (tenantId, sourceKey) => `${tenantId}::${sourceKey}`;
 const alertRef  = (tenantId, sourceKey) =>
   db().collection('tenants').doc(tenantId).collection('alerts').doc(sourceKey);
@@ -95,6 +103,11 @@ const raise = async (ctx, reRaise = false) => {
     try { await emailHook(tenantId, sourceKey, { ...data, ...ctx }); }
     catch (e) { console.error('[alertState] emailHook:', e.message); }
   }
+
+  if (automationHook) {
+    try { await automationHook(tenantId, sourceKey, { ...data, ...ctx }); }
+    catch (e) { console.error('[alertState] automationHook:', e.message); }
+  }
 };
 
 // Productor de condición: `active` indica si la condición de alarma se cumple.
@@ -145,4 +158,4 @@ const markEmailSent = async (tenantId, sourceKey) => {
 
 const stop = () => listeners.forEach(u => u());
 
-module.exports = { watch, applyCondition, getState, markEmailSent, setEmailHook, stop };
+module.exports = { watch, applyCondition, getState, markEmailSent, setEmailHook, setAutomationHook, stop };
