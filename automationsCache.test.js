@@ -139,3 +139,29 @@ test('notifyOnFailure con destinatarios se resuelve y corta en 10', () => {
   const e2 = buildEntry(base({ notifyOnFailure: { enabled: true, recipientUids: many } }));
   assert.equal(e2.notifyOnFailure.recipientUids.length, 10);
 });
+
+// --- Disparo por tiempo encendido ('runtime') ---
+
+test('resuelve un disparo por tiempo encendido contra un widget con lectura', () => {
+  const e = buildEntry(base({
+    trigger: { kind: 'runtime', widgetId: 'w2', durationMinutes: 120 },
+  }));
+  assert.ok(e);
+  assert.deepEqual(e.trigger, {
+    kind: 'runtime', topic: 'planta/bomba/estado', dataKey: 'st',
+    durationMinutes: 120, widgetTitle: 'Bomba A',
+  });
+});
+
+test('descarta si el widget no tiene tópico o dataKey para leer su estado', () => {
+  // w3 tiene commandTopic pero no topic/dataKey — se puede accionar, no vigilar.
+  assert.equal(buildEntry(base({ trigger: { kind: 'runtime', widgetId: 'w3', durationMinutes: 60 } })), null);
+  assert.equal(buildEntry(base({ trigger: { kind: 'runtime', widgetId: 'nope', durationMinutes: 60 } })), null);
+});
+
+test('descarta una duración inválida', () => {
+  assert.equal(buildEntry(base({ trigger: { kind: 'runtime', widgetId: 'w2', durationMinutes: 0 } })), null);
+  assert.equal(buildEntry(base({ trigger: { kind: 'runtime', widgetId: 'w2', durationMinutes: -5 } })), null);
+  assert.equal(buildEntry(base({ trigger: { kind: 'runtime', widgetId: 'w2' } })), null);
+  assert.equal(buildEntry(base({ trigger: { kind: 'runtime', widgetId: 'w2', durationMinutes: 'abc' } })), null);
+});

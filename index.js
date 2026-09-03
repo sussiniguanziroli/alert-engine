@@ -11,7 +11,9 @@ const automationEngine = require('./automationEngine');
 const commandSender    = require('./commandSender');
 const pauseRegistry    = require('./pauseRegistry');
 const scheduler        = require('./scheduler');
-const { extractValue } = require('./payload');
+const runtimeWatcher   = require('./runtimeWatcher');
+const { extractValue }  = require('./payload');
+const { parseSwitchOn } = require('./boolTokens');
 
 const LOCAL_BROKER = process.env.MQTT_BROKER || 'mqtt://localhost:1883';
 const MQTT_USER    = process.env.MQTT_USER   || '';
@@ -94,8 +96,11 @@ const start = async () => {
     console.log('✅ [alert-engine] Conectado al broker');
     subscribeToTopics();
     // El scheduler arranca recién con el broker arriba: si recupera una corrida
-    // vencida, el comando tiene que poder salir de verdad.
+    // vencida, el comando tiene que poder salir de verdad. Mismo motivo para
+    // runtimeWatcher: si al arrancar ya se cumplió una duración pendiente, el
+    // primer tick tiene que poder disparar el comando de verdad.
     scheduler.start().catch(e => console.error('[alert-engine] scheduler:', e.message));
+    runtimeWatcher.start();
   });
 
   mqttClient.on('message', async (topic, message) => {
@@ -134,12 +139,20 @@ const start = async () => {
       }
     }
 
-    // --- Automatizaciones por medición ---
+    // --- Automatizaciones por medición y por tiempo encendido ---
+    // Comparten índice (las dos se despachan por mensaje MQTT), pero
+    // interpretan el valor distinto: la primera como número contra un
+    // umbral, la segunda como on/off para seguir el flanco de encendido.
     for (const entry of automationsCache.getByTopic(topic)) {
       const value = extractValue(payloadStr, entry.trigger.dataKey);
       if (value === null || value === undefined) continue;
-      const active = evaluator.evaluate(value, entry.trigger.condition, entry.trigger.threshold);
-      await automationEngine.applyTelemetry(entry, active, value);
+
+      if (entry.trigger.kind === 'telemetry') {
+        const active = evaluator.evaluate(value, entry.trigger.condition, entry.trigger.threshold);
+        await automationEngine.applyTelemetry(entry, active, value);
+      } else if (entry.trigger.kind === 'runtime') {
+        await automationEngine.applyRuntime(entry, parseSwitchOn(value));
+      }
     }
   });
 
@@ -158,6 +171,7 @@ process.on('SIGINT', () => {
   automationsCache.stop();
   pauseRegistry.stop();
   scheduler.stop();
+  runtimeWatcher.stop();
   if (mqttClient) mqttClient.end(true);
   process.exit(0);
 });

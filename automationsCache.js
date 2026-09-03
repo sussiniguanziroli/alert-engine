@@ -6,22 +6,28 @@ const db = () => admin.firestore();
 
 // Cache reactivo de las automatizaciones, hermano de rulesCache.js.
 //
-// La diferencia con las alertas es que un disparo puede venir por tres caminos
-// distintos, así que hace falta más de un índice:
-//   byTopic      -> disparos por medición (llega un mensaje MQTT)
-//   bySourceKey  -> disparos encadenados a una alarma (RAISE en alertState)
-//   scheduled    -> disparos por horario (los recorre el scheduler cada minuto)
+// La diferencia con las alertas es que un disparo puede venir por cuatro
+// caminos distintos, así que hace falta más de un índice:
+//   byTopic        -> disparos por medición Y por tiempo encendido (llega un
+//                      mensaje MQTT; 'runtime' además necesita el chequeo
+//                      periódico de abajo, no le alcanza con el mensaje)
+//   bySourceKey    -> disparos encadenados a una alarma (RAISE en alertState)
+//   scheduled      -> disparos por horario (los recorre scheduler.js cada minuto)
+//   runtimeWatched -> disparos por tiempo encendido (los recorre
+//                      runtimeWatcher.js cada minuto, para saber si YA pasó
+//                      la duración aunque no haya llegado ningún mensaje nuevo)
 //
-// Y una cuarta cosa que rulesCache no necesitaba: los tópicos de ESTADO de los
+// Y una cosa más que rulesCache no necesitaba: los tópicos de ESTADO de los
 // widgets que se accionan. Sin suscribirlos no hay readback, y sin readback no
 // se puede saber si el equipo obedeció. rulesCache solo suscribe tópicos de
 // widgets con alertas, y un botón normalmente no tiene ninguna.
 
-const byLocation  = new Map();   // `${tenantId}/${locationId}` -> entry[]
-const byTopic     = new Map();   // topic     -> entry[]
-const bySourceKey = new Map();   // sourceKey -> entry[]
-let   scheduled   = [];          // entry[]
-const listeners   = [];
+const byLocation     = new Map();   // `${tenantId}/${locationId}` -> entry[]
+const byTopic        = new Map();   // topic     -> entry[]
+const bySourceKey    = new Map();   // sourceKey -> entry[]
+let   scheduled      = [];          // entry[]
+let   runtimeWatched = [];          // entry[]
+const listeners      = [];
 
 const locKey = (tenantId, locationId) => `${tenantId}/${locationId}`;
 
@@ -63,6 +69,22 @@ const buildEntry = ({ tenantId, locationId, locationName, timezone, locationEnab
   } else if (trg.kind === 'alarm') {
     if (!trg.sourceKey) return null;
     entry.trigger = { kind: 'alarm', sourceKey: trg.sourceKey };
+  } else if (trg.kind === 'runtime') {
+    // "Encendido hace más de X" — no dispara a una hora fija (eso es
+    // 'schedule'), dispara X minutos después de que ESTE widget pasa de
+    // apagado a encendido. Comparte el mismo mecanismo de lectura que
+    // 'telemetry' (topic + dataKey, se despacha por mensaje MQTT), pero
+    // interpreta el valor como on/off en vez de como número.
+    const w = widgets.find(x => x.id === trg.widgetId);
+    if (!w?.topic || !w?.dataKey) return null;
+    const durationMinutes = Number(trg.durationMinutes);
+    if (!durationMinutes || durationMinutes <= 0) return null;
+    entry.trigger = {
+      kind: 'runtime',
+      topic: w.topic, dataKey: w.dataKey,
+      durationMinutes,
+      widgetTitle: w.title || w.dataKey,
+    };
   } else {
     return null;
   }
@@ -111,18 +133,23 @@ const rebuildIndexes = () => {
   byTopic.clear();
   bySourceKey.clear();
   scheduled = [];
+  runtimeWatched = [];
 
   byLocation.forEach(entries => {
     entries.forEach(e => {
-      if (e.trigger.kind === 'telemetry') {
+      // 'telemetry' y 'runtime' comparten el mismo índice por topic: los dos
+      // se despachan por mensaje MQTT, solo cambia cómo se interpreta el
+      // valor una vez que llega (evaluador numérico vs on/off).
+      if (e.trigger.kind === 'telemetry' || e.trigger.kind === 'runtime') {
         if (!byTopic.has(e.trigger.topic)) byTopic.set(e.trigger.topic, []);
         byTopic.get(e.trigger.topic).push(e);
-      } else if (e.trigger.kind === 'alarm') {
+      }
+      if (e.trigger.kind === 'alarm') {
         if (!bySourceKey.has(e.trigger.sourceKey)) bySourceKey.set(e.trigger.sourceKey, []);
         bySourceKey.get(e.trigger.sourceKey).push(e);
-      } else if (e.trigger.kind === 'schedule') {
-        scheduled.push(e);
       }
+      if (e.trigger.kind === 'schedule') scheduled.push(e);
+      if (e.trigger.kind === 'runtime')  runtimeWatched.push(e);
     });
   });
 };
@@ -180,16 +207,17 @@ const load = async () => {
   console.log('✅ [automationsCache] Listo');
 };
 
-const getByTopic     = (topic)     => byTopic.get(topic)         ?? [];
-const getBySourceKey = (sourceKey) => bySourceKey.get(sourceKey) ?? [];
-const getScheduled   = ()          => scheduled;
+const getByTopic       = (topic)     => byTopic.get(topic)         ?? [];
+const getBySourceKey   = (sourceKey) => bySourceKey.get(sourceKey) ?? [];
+const getScheduled     = ()          => scheduled;
+const getRuntimeWatched = ()         => runtimeWatched;
 
 // Todo lo que el motor necesita escuchar por las automatizaciones: los tópicos
 // que disparan Y los de estado que confirman.
 const getTopics = () => {
   const topics = new Set();
   byLocation.forEach(entries => entries.forEach(e => {
-    if (e.trigger.kind === 'telemetry') topics.add(e.trigger.topic);
+    if (e.trigger.kind === 'telemetry' || e.trigger.kind === 'runtime') topics.add(e.trigger.topic);
     if (e.action.kind === 'command' && e.action.readbackTopic) topics.add(e.action.readbackTopic);
   }));
   return Array.from(topics);
@@ -197,4 +225,4 @@ const getTopics = () => {
 
 const stop = () => listeners.forEach(u => u());
 
-module.exports = { load, getByTopic, getBySourceKey, getScheduled, getTopics, stop, buildEntry };
+module.exports = { load, getByTopic, getBySourceKey, getScheduled, getRuntimeWatched, getTopics, stop, buildEntry };

@@ -23,6 +23,14 @@ const setClient = (c) => { mqttClient = c; };
 const runState = new Map();
 const rsKey = (tenantId, automationId) => `${tenantId}/${automationId}`;
 
+// "Encendido desde" de los disparos por tiempo encendido ('runtime').
+//   `${tenantId}/${automationId}` -> ms del instante en que se vio el
+//   flanco apagado→encendido, o ausente si está apagado / nunca se vio.
+// Se PERSISTE en automationState (ver applyRuntime) y se recupera en
+// hydrate(): si pm2 recarga a mitad de la cuenta, retoma donde iba en vez de
+// perder la memoria del temporizador y dejar el equipo encendido de más.
+const onSinceMs = new Map();
+
 const stateRef = (entry) => db()
   .collection('tenants').doc(entry.tenantId)
   .collection('locations').doc(entry.locationId)
@@ -37,13 +45,18 @@ const stateRef = (entry) => db()
 const hydrate = async () => {
   try {
     const snap = await db().collectionGroup('automationState').get();
+    let resumed = 0;
     snap.forEach(doc => {
       const p = doc.ref.path.split('/');   // tenants/{t}/locations/{l}/automationState/{id}
       const d = doc.data();
       const last = d.lastRunAt?.toMillis ? d.lastRunAt.toMillis() : 0;
       runState.set(rsKey(p[1], doc.id), { lastRunMs: last, conditionActive: false });
+
+      const onSince = d.onSinceAt?.toMillis ? d.onSinceAt.toMillis() : null;
+      if (onSince) { onSinceMs.set(rsKey(p[1], doc.id), onSince); resumed++; }
     });
     console.log(`💾 [automationEngine] Estado de ${snap.size} automatización(es) recuperado`);
+    if (resumed) console.log(`⏱️  [automationEngine] ${resumed} temporizador(es) de tiempo encendido retomados`);
   } catch (e) {
     // Sin índice o sin datos todavía: no es fatal, solo significa que el
     // antirrebote arranca en cero.
@@ -292,8 +305,58 @@ const applyTelemetry = async (entry, active, value) => {
   await trigger(entry, `${entry.trigger.widgetTitle} ${entry.trigger.condition} ${entry.trigger.threshold} (valor ${value})`);
 };
 
+// Disparo por tiempo encendido — mitad 1 de 2 (la otra es checkRuntime, que
+// llama runtimeWatcher.js cada minuto). Acá solo se seguye el FLANCO
+// apagado→encendido para saber CUÁNDO arrancar la cuenta, y se persiste ese
+// instante para sobrevivir un reinicio del motor. La cuenta arranca la
+// primera vez que se ve "encendido" — si la regla se activa con el equipo ya
+// prendido, arranca desde ese momento, no desde un pasado que no podemos
+// conocer con certeza.
+const applyRuntime = async (entry, isOn) => {
+  const k = rsKey(entry.tenantId, entry.automationId);
+  if (isOn) {
+    if (onSinceMs.has(k)) return;   // ya la estaba contando, no reiniciar
+    onSinceMs.set(k, Date.now());
+    await stateRef(entry)
+      .set({ onSinceAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true })
+      .catch(e => console.error('[automationEngine] applyRuntime persist:', e.message));
+  } else if (onSinceMs.has(k)) {
+    // Se apagó antes de cumplir la duración: se cancela la cuenta.
+    onSinceMs.delete(k);
+    await stateRef(entry)
+      .set({ onSinceAt: null }, { merge: true })
+      .catch(e => console.error('[automationEngine] applyRuntime persist:', e.message));
+  }
+};
+
+// Mitad 2 de 2: llamado cada minuto por runtimeWatcher.js. A diferencia de
+// applyRuntime (que reacciona a un mensaje MQTT), esto es lo que detecta que
+// YA pasó la duración aunque no haya llegado ningún mensaje nuevo desde que
+// se prendió — un equipo que reporta su estado poco seguido igual se apaga a
+// tiempo.
+const checkRuntime = async (entry) => {
+  const k = rsKey(entry.tenantId, entry.automationId);
+  const since = onSinceMs.get(k);
+  if (since == null) return;
+
+  const elapsedMin = (Date.now() - since) / 60000;
+  if (elapsedMin < entry.trigger.durationMinutes) return;
+
+  // Se consume ANTES de disparar: si el disparo queda bloqueado (regla
+  // pausada justo en ese instante), no se reintenta cada minuto — hace falta
+  // un apagado y un nuevo encendido para que la cuenta vuelva a arrancar. Es
+  // la misma lógica que ya tiene applyTelemetry con conditionActive: acá se
+  // registra el HECHO de que se cumplió, la compuerta de si actúa o no la
+  // decide trigger() por su cuenta.
+  onSinceMs.delete(k);
+  await stateRef(entry).set({ onSinceAt: null }, { merge: true }).catch(() => {});
+
+  const mins = Math.round(elapsedMin);
+  await trigger(entry, `encendido hace ${mins} min (máximo ${entry.trigger.durationMinutes})`);
+};
+
 module.exports = {
   ACTOR, ACTOR_ID,
-  setClient, hydrate, trigger, applyTelemetry,
-  blockedReason, cooldownRemainingMs, outcomeOf, getState, runState,
+  setClient, hydrate, trigger, applyTelemetry, applyRuntime, checkRuntime,
+  blockedReason, cooldownRemainingMs, outcomeOf, getState, runState, onSinceMs,
 };
