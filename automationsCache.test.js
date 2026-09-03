@@ -116,3 +116,26 @@ test('arrastra la pausa de la ubicación y la zona horaria', () => {
   assert.equal(e.locationEnabled, false);
   assert.equal(e.timezone, 'America/Santiago');
 });
+
+// El aviso de fallo es opcional de verdad: a diferencia del disparo y la
+// acción, que si faltan invalidan toda la regla, acá null es un estado
+// normal — no lo configuraron, no es un motivo para descartar la automatización.
+test('sin notifyOnFailure configurado, la entrada se resuelve igual con el campo en null', () => {
+  const e = buildEntry(base());
+  assert.ok(e);
+  assert.equal(e.notifyOnFailure, null);
+});
+
+test('notifyOnFailure desactivado o sin destinatarios queda en null', () => {
+  assert.equal(buildEntry(base({ notifyOnFailure: { enabled: false, recipientUids: ['u1'] } })).notifyOnFailure, null);
+  assert.equal(buildEntry(base({ notifyOnFailure: { enabled: true, recipientUids: [] } })).notifyOnFailure, null);
+});
+
+test('notifyOnFailure con destinatarios se resuelve y corta en 10', () => {
+  const e = buildEntry(base({ notifyOnFailure: { enabled: true, recipientUids: ['u1', 'u2'] } }));
+  assert.deepEqual(e.notifyOnFailure, { recipientUids: ['u1', 'u2'] });
+
+  const many = Array.from({ length: 25 }, (_, i) => `u${i}`);
+  const e2 = buildEntry(base({ notifyOnFailure: { enabled: true, recipientUids: many } }));
+  assert.equal(e2.notifyOnFailure.recipientUids.length, 10);
+});

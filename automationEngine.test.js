@@ -87,3 +87,24 @@ test('el estado tampoco se mezcla entre tenants con el mismo id de regla', () =>
   engine.getState(a).lastRunMs = 999;
   assert.equal(engine.getState(b).lastRunMs, 0);
 });
+
+// outcomeOf es lo que queda escrito en automationState y lo que el panel
+// muestra como el resultado de la última corrida. Un booleano no alcanza: hay
+// que distinguir "salió y confirmó" de "salió, pero el equipo no confirmó" —
+// que es justo la diferencia que le importa a un operador.
+test('outcomeOf: un comando confirmado (o sin equipo que confirme) es ok', () => {
+  assert.equal(engine.outcomeOf({ ok: true, confirmed: true }), 'ok');
+  // Un control sin tópico de estado no tiene nada contra qué confirmar.
+  assert.equal(engine.outcomeOf({ ok: true, confirmed: null }), 'ok');
+  // Una notificación no lleva `confirmed` en absoluto.
+  assert.equal(engine.outcomeOf({ ok: true }), 'ok');
+});
+
+test('outcomeOf: confirmed:false es "unsure", NO un fallo', () => {
+  assert.equal(engine.outcomeOf({ ok: true, confirmed: false }), 'unsure');
+});
+
+test('outcomeOf: ok:false siempre es "failed", sin importar confirmed', () => {
+  assert.equal(engine.outcomeOf({ ok: false }), 'failed');
+  assert.equal(engine.outcomeOf({ ok: false, confirmed: false }), 'failed');
+});

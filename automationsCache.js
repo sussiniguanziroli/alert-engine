@@ -95,6 +95,15 @@ const buildEntry = ({ tenantId, locationId, locationName, timezone, locationEnab
     return null;
   }
 
+  // --- Aviso de fallo (opcional, independiente del tipo de acción) ---
+  // A diferencia del disparo y de la acción, que si faltan invalidan toda la
+  // regla, esto es opcional de verdad: null es un estado normal (no configuró
+  // el aviso), no un motivo para descartar la automatización entera.
+  const nof = automation.notifyOnFailure;
+  entry.notifyOnFailure = (nof?.enabled && nof.recipientUids?.length)
+    ? { recipientUids: nof.recipientUids.slice(0, 10) }
+    : null;
+
   return entry;
 };
 

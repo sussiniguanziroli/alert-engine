@@ -109,27 +109,48 @@ const cooldownRemainingMs = (entry) => {
   return elapsed >= mins * 60000 ? 0 : mins * 60000 - elapsed;
 };
 
-const persistRun = async (entry, ok, detail) => {
+// Tres veredictos, no dos: un booleano no alcanza para distinguir "salió bien"
+// de "salió, pero el equipo no confirmó" — y esa distinción es exactamente lo
+// que un operador necesita ver. `confirmed` solo existe para acciones de
+// comando (una notificación no tiene equipo que confirmar, así que llega
+// undefined/null y cae en 'ok').
+const outcomeOf = (result) => {
+  if (result.ok === false) return 'failed';
+  if (result.confirmed === false) return 'unsure';
+  return 'ok';
+};
+
+const persistRun = async (entry, outcome, detail) => {
   const st = getState(entry);
   st.lastRunMs = Date.now();
   try {
     await stateRef(entry).set({
-      lastRunAt:  admin.firestore.FieldValue.serverTimestamp(),
-      lastRunOk:  ok,
-      lastDetail: detail ?? null,
+      lastRunAt:      admin.firestore.FieldValue.serverTimestamp(),
+      // 'ok' | 'unsure' | 'failed' — mismo vocabulario que usa el panel
+      // (features/automations/runSummary.js) para no reinterpretar nada del
+      // lado del cliente.
+      lastOutcome:    outcome,
+      lastDetail:     detail ?? null,
       automationName: entry.name,
-      machineId:  entry.machineId ?? null,
+      machineId:      entry.machineId ?? null,
     }, { merge: true });
   } catch (e) {
     console.error('[automationEngine] persistRun:', e.message);
   }
 };
 
-const runNotify = async (entry, reason) => {
+// Compartido entre la acción "Avisar" y el aviso de fallo: resuelve uids de
+// Firestore a direcciones de email. `in` de Firestore tope 10, por eso ambos
+// lados (buildEntry acá y en automationsCache.js) cortan recipientUids ahí.
+const emailsFor = async (recipientUids) => {
   const usersSnap = await db().collection('users')
-    .where(admin.firestore.FieldPath.documentId(), 'in', entry.action.recipientUids)
+    .where(admin.firestore.FieldPath.documentId(), 'in', recipientUids)
     .get();
-  const emails = usersSnap.docs.map(d => d.data().email).filter(Boolean);
+  return usersSnap.docs.map(d => d.data().email).filter(Boolean);
+};
+
+const runNotify = async (entry, reason) => {
+  const emails = await emailsFor(entry.action.recipientUids);
   if (!emails.length) return { ok: false, detail: 'sin destinatarios con email' };
 
   await db().collection('email_trigger_queue').add({
@@ -163,6 +184,40 @@ const runCommand = async (entry) => {
     confirmed: res.confirmed,
     detail: res.confirmed ? 'confirmado por el equipo' : 'enviado, sin confirmación del equipo',
   };
+};
+
+// Aviso de fallo — independiente de `entry.action.kind`: un comando que no
+// salió y una notificación que no encontró destinatarios avisan por acá igual.
+// No tiene cooldown propio porque no le hace falta: ya está detrás del
+// cooldown de la propia automatización (cooldownRemainingMs en trigger()), así
+// que no puede mandar más seguido que lo que la regla permite disparar.
+const sendFailureEmail = async (entry, reason, result) => {
+  if (!entry.notifyOnFailure?.recipientUids?.length) return;
+  try {
+    const emails = await emailsFor(entry.notifyOnFailure.recipientUids);
+    if (!emails.length) return;
+
+    await db().collection('email_trigger_queue').add({
+      to: emails,
+      message: {
+        subject: `[LightBug] Falló — ${entry.name} · ${entry.machineName}`,
+        html: `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;background:#f1f5f9;">
+  <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:14px;padding:28px 32px;border-top:4px solid #ef4444;">
+    <p style="margin:0 0 4px;font-size:11px;font-weight:800;letter-spacing:.12em;text-transform:uppercase;color:#ef4444;">⚡ LightBug Automations</p>
+    <h1 style="margin:0 0 16px;font-size:20px;color:#0f172a;">No se pudo ejecutar: ${entry.name}</h1>
+    <p style="margin:0 0 8px;font-size:14px;color:#334155;">Se cumplió la condición en <b>${entry.machineName}</b>, pero la acción no salió bien.</p>
+    <p style="margin:0 0 8px;font-size:13px;color:#64748b;font-family:monospace;">${reason}</p>
+    <p style="margin:0 0 20px;font-size:13px;color:#ef4444;font-family:monospace;font-weight:700;">${result.detail || 'sin detalle'}</p>
+    <a href="https://sflightbug.com/app/home" style="display:inline-block;background:#1e293b;color:#fff;text-decoration:none;padding:12px 28px;border-radius:9px;font-weight:700;font-size:13px;">Ver en el panel</a>
+    <p style="margin:22px 0 0;font-size:11px;color:#94a3b8;">Mensaje automático de SF LightBug · plataforma@sfflow.com.ar</p>
+  </div>
+</body></html>`,
+      },
+    });
+  } catch (e) {
+    console.error('[automationEngine] sendFailureEmail:', e.message);
+  }
 };
 
 // Punto de entrada único de los tres tipos de disparo.
@@ -212,8 +267,18 @@ const trigger = async (entry, reason) => {
     await logEvent(entry, result.ok ? 'NOTIFIED' : 'FAILED', { detail: result.detail });
   }
 
-  await persistRun(entry, result.ok, result.detail);
-  console.log(`${result.ok ? '✅' : '❌'} [automationEngine] ${entry.name}: ${result.detail}`);
+  const outcome = outcomeOf(result);
+  await persistRun(entry, outcome, result.detail);
+  const icon = outcome === 'ok' ? '✅' : outcome === 'unsure' ? '⚠️' : '❌';
+  console.log(`${icon} [automationEngine] ${entry.name}: ${result.detail}`);
+
+  // Fuera del "ok" limpio: tanto 'unsure' (salió pero el equipo no confirmó)
+  // como 'failed' avisan, si así se configuró — 'unsure' es exactamente el
+  // caso "salió una orden y no sabemos si se ejecutó" que un operador necesita
+  // ver, no solo los fallos catastróficos.
+  if (outcome !== 'ok') {
+    await sendFailureEmail(entry, reason, result);
+  }
 };
 
 // Disparo por medición. Solo en el FLANCO (la condición pasa de falsa a
@@ -230,5 +295,5 @@ const applyTelemetry = async (entry, active, value) => {
 module.exports = {
   ACTOR, ACTOR_ID,
   setClient, hydrate, trigger, applyTelemetry,
-  blockedReason, cooldownRemainingMs, getState, runState,
+  blockedReason, cooldownRemainingMs, outcomeOf, getState, runState,
 };
